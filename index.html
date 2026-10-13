@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f5f1" />
+    <title>Margin — notes that stay in sync</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#" aria-label="Margin home">
+          <span class="brand-mark"><span></span><span></span><span></span></span>
+          <span>margin<span class="brand-period">.</span></span>
+        </a>
+
+        <button class="workspace-switcher">
+          <span class="workspace-avatar">S</span>
+          <span class="workspace-label"><strong>Sam's workspace</strong><small>Personal plan</small></span>
+          <span class="chevron">⌄</span>
+        </button>
+
+        <nav class="primary-nav" aria-label="Main navigation">
+          <button class="nav-item active" data-view="notes"><span class="nav-icon">▤</span>All notes <span class="nav-count">12</span></button>
+          <button class="nav-item" data-view="flashcards"><span class="nav-icon">▣</span>Flashcards <span class="nav-count warm">3</span></button>
+          <button class="nav-item" data-view="pdf"><span class="nav-icon">▧</span>PDF study</button>
+        </nav>
+
+        <div class="sidebar-section-heading"><span>YOUR NOTEBOOKS</span><button id="addNotebook" class="icon-button tiny" aria-label="Add notebook">＋</button></div>
+        <div id="notebookList" class="notebook-list"></div>
+
+        <div class="sidebar-bottom">
+          <div class="sync-card">
+            <div class="sync-card-top"><span class="sync-dot"></span><strong>Ready to sync</strong><span class="mini-spark">✦</span></div>
+            <p>Changes save as you write. Open another tab to see live updates.</p>
+            <span class="sync-badge">LOCAL DEMO</span>
+          </div>
+          <button class="nav-item settings-item"><span class="nav-icon">⚙</span>Settings <span class="soon-label">SOON</span></button>
+          <div class="profile-row"><div class="profile-avatar">S</div><div><strong>Sam Rivera</strong><small>Free plan</small></div><button class="icon-button more-button" aria-label="Profile menu">···</button></div>
+        </div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div class="breadcrumbs"><span id="breadcrumbNotebook">Biology 101</span><span class="crumb-slash">/</span><span id="breadcrumbTab">Cell structure</span></div>
+          <div class="topbar-actions">
+            <div class="search-wrap">
+              <span class="search-icon">⌕</span>
+              <input id="searchInput" type="search" placeholder="Search notes..." autocomplete="off" aria-label="Search notes" />
+              <kbd>⌘ K</kbd>
+              <div id="searchResults" class="search-results hidden"></div>
+            </div>
+            <span class="avatar-stack" aria-label="Two collaborators"><span class="collab-avatar coral">J</span><span class="collab-avatar blue">M</span><span class="collab-avatar add-avatar">＋</span></span>
+            <button id="shareButton" class="share-button"><span>↗</span> Share</button>
+            <button class="top-more icon-button" aria-label="More options">···</button>
+          </div>
+        </header>
+
+        <section id="notesView" class="view notes-view">
+          <div class="tab-strip" id="tabStrip"><div class="tabs" id="tabs"></div><button id="addTab" class="add-tab" aria-label="Add section tab">＋</button><div class="tab-strip-spacer"></div><span class="tab-hint">Notebook sections</span></div>
+          <div class="note-scroll">
+            <div class="note-heading-row">
+              <div class="note-heading-copy">
+                <div class="eyebrow"><span class="eyebrow-dot"></span><span id="noteNotebookLabel">BIOLOGY 101</span><span class="eyebrow-divider">·</span><span id="noteUpdated">Edited just now</span></div>
+                <h1 id="noteTitle" contenteditable="true" spellcheck="false">Cell structure</h1>
+                <p class="note-subtitle">Lecture notes <span class="subtle-dot">·</span> add a thought, paste an image, or sketch it out</p>
+              </div>
+              <button class="favorite-button" id="favoriteButton" aria-label="Favorite note">☆</button>
+            </div>
+
+            <div class="editor-toolbar" role="toolbar" aria-label="Note formatting">
+              <button class="tool-button" data-command="bold" aria-label="Bold"><strong>B</strong></button>
+              <button class="tool-button italic" data-command="italic" aria-label="Italic">I</button>
+              <button class="tool-button" data-command="underline" aria-label="Underline"><u>U</u></button>
+              <span class="toolbar-divider"></span>
+              <button class="tool-button text-style" data-command="formatBlock" data-value="h2">H<sub>2</sub></button>
+              <button class="tool-button" id="bulletButton" aria-label="Bulleted list">☷</button>
+              <button class="tool-button" id="checklistButton" aria-label="Checklist">☑</button>
+              <span class="toolbar-divider"></span>
+              <button class="tool-button" id="toggleButton"><span class="toggle-glyph">⌄</span> Toggle</button>
+              <button class="tool-button" id="insertImageButton"><span>▧</span> Image</button>
+              <button class="tool-button" id="pageLinkButton"><span>⌁</span> PDF link</button>
+              <span class="toolbar-divider"></span>
+              <button class="tool-button annotate-tool" id="annotateButton"><span>✎</span> Annotate</button>
+              <input id="imageInput" type="file" accept="image/*" hidden />
+            </div>
+
+            <article id="noteBody" class="note-body" contenteditable="true" spellcheck="true" aria-label="Note editor"></article>
+
+            <section id="annotationPanel" class="annotation-panel hidden" aria-label="Handwritten annotations">
+              <div class="annotation-head"><div><strong>Handwritten layer</strong><span>Use Apple Pencil, stylus, mouse, or touch</span></div><div class="annotation-controls"><button class="pen-color active" data-color="#253e37" aria-label="Dark green pen"></button><button class="pen-color" data-color="#dc775e" aria-label="Coral pen"></button><button class="pen-color" data-color="#627ea9" aria-label="Blue pen"></button><button id="eraserButton" class="eraser-button">⌫ Erase</button><button id="clearInkButton" class="clear-button">Clear</button></div></div>
+              <canvas id="inkCanvas" class="ink-canvas" aria-label="Draw on this canvas"></canvas>
+              <label class="ink-caption"><span>✦</span><span>Searchable handwriting</span><input id="handwritingIndex" type="text" placeholder="Add a few words from your handwritten notes…" /><small>OCR can fill this in automatically later.</small></label>
+            </section>
+
+            <div class="note-footer"><span class="saved-indicator"><span class="save-dot"></span><span id="saveStatus">All changes saved</span></span><span>Private to you <span class="footer-lock">⌑</span></span></div>
+          </div>
+        </section>
+
+        <section id="flashcardsView" class="view feature-view hidden">
+          <div class="feature-header"><div><div class="eyebrow"><span class="eyebrow-dot violet"></span>STUDY SPACE</div><h1>Flashcards</h1><p>Turn your notes into a small, focused study session.</p></div><button class="primary-button" id="createDeckButton">＋ New deck</button></div>
+          <div class="study-summary"><div class="summary-icon">✦</div><div class="summary-copy"><strong>Cell biology · Lecture 04</strong><span>8 cards <i>·</i> about 5 minutes</span></div><div class="summary-progress"><div class="progress-label"><span>Mastery</span><strong id="masteryLabel">38%</strong></div><div class="progress-track"><span id="masteryProgress" style="width:38%"></span></div></div><button id="startStudyButton" class="study-button">Study now <span>→</span></button></div>
+          <div class="section-title-row"><div><h2>Your progress</h2><p>A little practice goes a long way.</p></div><button class="text-button" id="resetStudyButton">Reset progress</button></div>
+          <div class="progress-cards"><div class="progress-card"><span class="progress-card-icon mint">✓</span><div><strong id="knownCount">3</strong><span>Cards mastered</span></div><div class="tiny-progress"><i style="width:38%"></i></div></div><div class="progress-card"><span class="progress-card-icon peach">↻</span><div><strong id="reviewCount">5</strong><span>Need another look</span></div><div class="tiny-progress peach-track"><i style="width:62%"></i></div></div><div class="progress-card"><span class="progress-card-icon lavender">◷</span><div><strong>4 <small>day streak</small></strong><span>You're showing up</span></div><div class="streak-dots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div></div>
+          <div class="section-title-row deck-title-row"><div><h2>Recent decks</h2><p>Made from your notes, ready when you are.</p></div><button class="text-button">View all <span>→</span></button></div>
+          <div class="deck-list"><button class="deck-row" id="deckRow"><span class="deck-cover cover-green">✿</span><span class="deck-info"><strong>Cell biology · Lecture 04</strong><small>Biology 101 <i>·</i> 8 cards</small></span><span class="deck-meter"><span>38% mastered</span><i><b style="width:38%"></b></i></span><span class="row-arrow">→</span></button><button class="deck-row"><span class="deck-cover cover-peach">◈</span><span class="deck-info"><strong>Research methods</strong><small>Research journal <i>·</i> 14 cards</small></span><span class="deck-meter"><span>72% mastered</span><i><b style="width:72%"></b></i></span><span class="row-arrow">→</span></button><button class="deck-row"><span class="deck-cover cover-blue">⌘</span><span class="deck-info"><strong>Exam review · Week 3</strong><small>Biology 101 <i>·</i> 12 cards</small></span><span class="deck-meter"><span>Not started</span><i><b style="width:0%"></b></i></span><span class="row-arrow">→</span></button></div>
+        </section>
+
+        <section id="pdfView" class="view pdf-view hidden">
+          <div class="pdf-toolbar"><div><div class="eyebrow"><span class="eyebrow-dot blue-dot"></span>PDF STUDY</div><h1 id="pdfTitle">Read alongside your notes</h1></div><label class="upload-pdf-button">＋ Open a PDF<input id="pdfInput" type="file" accept="application/pdf" hidden /></label></div>
+          <div class="pdf-workspace">
+            <div class="pdf-reader"><div class="reader-toolbar"><span class="file-name" id="pdfFileName">No document open</span><div class="page-controls"><button id="previousPage" aria-label="Previous page">‹</button><span>Page <input id="pageNumber" type="number" min="1" value="1" /> <span class="page-total">/ <span id="pageTotal">—</span></span></span><button id="nextPage" aria-label="Next page">›</button></div><button id="zoomButton" class="zoom-button">100%　⌄</button></div><div id="pdfEmpty" class="pdf-empty"><div class="pdf-empty-icon">▧</div><strong>Your document, next to your thoughts</strong><p>Open a PDF to read and annotate it. Link any note to a page to jump back here later.</p><label class="empty-upload">Choose a PDF<input id="pdfInputEmpty" type="file" accept="application/pdf" hidden /></label></div><iframe id="pdfFrame" class="pdf-frame hidden" title="PDF reader"></iframe></div>
+            <aside class="pdf-notes"><div class="pdf-notes-head"><div><h2>Linked notes</h2><p id="linkedNotesCount">2 notes connected</p></div><button class="icon-button" id="newPdfNote" aria-label="Add a linked note">＋</button></div><div id="linkedNoteList" class="linked-note-list"></div><div class="pdf-tip"><span>✦</span><p>Use <strong>PDF link</strong> in any note to connect it to this page.</p></div></aside>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="studyModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="studyModalTitle"><div class="study-modal"><button class="modal-close" id="closeStudyButton" aria-label="Close">×</button><div class="eyebrow"><span class="eyebrow-dot violet"></span>QUICK STUDY <span id="cardPosition" class="card-position">1 OF 8</span></div><h2 id="studyModalTitle">What is the function of the cell membrane?</h2><button id="revealAnswerButton" class="flashcard-face">Tap to reveal answer <span>↻</span></button><div id="answerArea" class="answer-area hidden">It regulates what enters and leaves the cell, helping maintain a stable internal environment.</div><div class="study-actions hidden" id="studyActions"><button id="againButton" class="again-button">↻　Review again</button><button id="knowButton" class="know-button">✓　I knew it</button></div></div></div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
