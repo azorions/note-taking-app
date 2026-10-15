@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f6f5f1" />
-    <title>Margin — notes that stay in sync</title>
+    <title>Margin — notes and study space</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -35,9 +35,9 @@
 
         <div class="sidebar-bottom">
           <div class="sync-card">
-            <div class="sync-card-top"><span class="sync-dot"></span><strong>Ready to sync</strong><span class="mini-spark">✦</span></div>
-            <p>Changes save as you write. Open another tab to see live updates.</p>
-            <span class="sync-badge">LOCAL DEMO</span>
+            <div class="sync-card-top"><span class="sync-dot"></span><strong id="syncHeadline">Saved on this device</strong><span class="mini-spark">✦</span></div>
+            <p id="syncDescription">Sign in to sync notes across your devices.</p>
+            <span id="syncBadge" class="sync-badge">LOCAL ONLY</span>
           </div>
           <button class="nav-item settings-item"><span class="nav-icon">⚙</span>Settings <span class="soon-label">SOON</span></button>
           <div class="profile-row"><div class="profile-avatar">S</div><div><strong>Sam Rivera</strong><small>Free plan</small></div><button class="icon-button more-button" aria-label="Profile menu">···</button></div>
@@ -54,8 +54,8 @@
               <kbd>⌘ K</kbd>
               <div id="searchResults" class="search-results hidden"></div>
             </div>
-            <span class="avatar-stack" aria-label="Two collaborators"><span class="collab-avatar coral">J</span><span class="collab-avatar blue">M</span><span class="collab-avatar add-avatar">＋</span></span>
-            <button id="shareButton" class="share-button"><span>↗</span> Share</button>
+            <span id="presenceStack" class="avatar-stack" aria-label="No other devices connected"></span>
+            <button id="shareButton" class="share-button"><span>↗</span> Sync</button>
             <button class="top-more icon-button" aria-label="More options">···</button>
           </div>
         </header>
@@ -84,17 +84,18 @@
               <button class="tool-button" id="toggleButton"><span class="toggle-glyph">⌄</span> Toggle</button>
               <button class="tool-button" id="insertImageButton"><span>▧</span> Image</button>
               <button class="tool-button" id="pageLinkButton"><span>⌁</span> PDF link</button>
+              <button class="tool-button" id="makeFlashcardButton"><span>▣</span> Make card</button>
               <span class="toolbar-divider"></span>
               <button class="tool-button annotate-tool" id="annotateButton"><span>✎</span> Annotate</button>
               <input id="imageInput" type="file" accept="image/*" hidden />
             </div>
 
-            <article id="noteBody" class="note-body" contenteditable="true" spellcheck="true" aria-label="Note editor"></article>
+            <article id="noteBody" class="note-body" spellcheck="true" aria-label="Note editor"></article>
 
             <section id="annotationPanel" class="annotation-panel hidden" aria-label="Handwritten annotations">
               <div class="annotation-head"><div><strong>Handwritten layer</strong><span>Use Apple Pencil, stylus, mouse, or touch</span></div><div class="annotation-controls"><button class="pen-color active" data-color="#253e37" aria-label="Dark green pen"></button><button class="pen-color" data-color="#dc775e" aria-label="Coral pen"></button><button class="pen-color" data-color="#627ea9" aria-label="Blue pen"></button><button id="eraserButton" class="eraser-button">⌫ Erase</button><button id="clearInkButton" class="clear-button">Clear</button></div></div>
               <canvas id="inkCanvas" class="ink-canvas" aria-label="Draw on this canvas"></canvas>
-              <label class="ink-caption"><span>✦</span><span>Searchable handwriting</span><input id="handwritingIndex" type="text" placeholder="Add a few words from your handwritten notes…" /><small>OCR can fill this in automatically later.</small></label>
+              <label class="ink-caption"><span>✦</span><span>Handwriting search terms</span><input id="handwritingIndex" type="text" placeholder="Type words you want found in this note…" /><small>Search checks these alongside typed text.</small></label>
             </section>
 
             <div class="note-footer"><span class="saved-indicator"><span class="save-dot"></span><span id="saveStatus">All changes saved</span></span><span>Private to you <span class="footer-lock">⌑</span></span></div>
@@ -113,8 +114,8 @@
         <section id="pdfView" class="view pdf-view hidden">
           <div class="pdf-toolbar"><div><div class="eyebrow"><span class="eyebrow-dot blue-dot"></span>PDF STUDY</div><h1 id="pdfTitle">Read alongside your notes</h1></div><label class="upload-pdf-button">＋ Open a PDF<input id="pdfInput" type="file" accept="application/pdf" hidden /></label></div>
           <div class="pdf-workspace">
-            <div class="pdf-reader"><div class="reader-toolbar"><span class="file-name" id="pdfFileName">No document open</span><div class="page-controls"><button id="previousPage" aria-label="Previous page">‹</button><span>Page <input id="pageNumber" type="number" min="1" value="1" /> <span class="page-total">/ <span id="pageTotal">—</span></span></span><button id="nextPage" aria-label="Next page">›</button></div><button id="zoomButton" class="zoom-button">100%　⌄</button></div><div id="pdfEmpty" class="pdf-empty"><div class="pdf-empty-icon">▧</div><strong>Your document, next to your thoughts</strong><p>Open a PDF to read and annotate it. Link any note to a page to jump back here later.</p><label class="empty-upload">Choose a PDF<input id="pdfInputEmpty" type="file" accept="application/pdf" hidden /></label></div><iframe id="pdfFrame" class="pdf-frame hidden" title="PDF reader"></iframe></div>
-            <aside class="pdf-notes"><div class="pdf-notes-head"><div><h2>Linked notes</h2><p id="linkedNotesCount">2 notes connected</p></div><button class="icon-button" id="newPdfNote" aria-label="Add a linked note">＋</button></div><div id="linkedNoteList" class="linked-note-list"></div><div class="pdf-tip"><span>✦</span><p>Use <strong>PDF link</strong> in any note to connect it to this page.</p></div></aside>
+            <div class="pdf-reader"><div class="reader-toolbar"><span class="file-name" id="pdfFileName">No document open</span><div class="page-controls"><button id="previousPage" aria-label="Previous page">‹</button><span>Page <input id="pageNumber" type="number" min="1" value="1" /> <span class="page-total">/ <span id="pageTotal">—</span></span></span><button id="nextPage" aria-label="Next page">›</button></div><button id="pdfAnnotateButton" class="zoom-button">✎ Annotate</button><button id="zoomButton" class="zoom-button">100%　⌄</button></div><div id="pdfEmpty" class="pdf-empty"><div class="pdf-empty-icon">▧</div><strong>Your document, next to your thoughts</strong><p>Open a PDF to read and annotate it. Link any note to a page to jump back here later.</p><label class="empty-upload">Choose a PDF<input id="pdfInputEmpty" type="file" accept="application/pdf" hidden /></label></div><div id="pdfCanvasHost" class="pdf-canvas-host hidden"><div id="pdfPageStage" class="pdf-page-stage"><canvas id="pdfCanvas"></canvas><canvas id="pdfAnnotationCanvas"></canvas></div></div></div>
+            <aside class="pdf-notes"><div class="pdf-notes-head"><div><h2>Notes on this page</h2><p id="linkedNotesCount">Choose a page to see linked notes</p></div><button class="icon-button" id="newPdfNote" aria-label="Add a linked note">＋</button></div><div id="linkedNoteList" class="linked-note-list"></div><div id="pdfNoLinkedNotes" class="pdf-no-linked hidden"><span>✦</span><strong>No notes on this page yet</strong><button id="createPdfNoteInline" class="text-button">Create a page note</button></div><div id="pdfInlineEditor" class="pdf-inline-editor hidden"><label class="pdf-note-label" for="pdfNoteTitle">NOTE TITLE</label><input id="pdfNoteTitle" class="pdf-note-title" type="text" placeholder="Untitled PDF note" /><div id="pdfNoteBody" class="pdf-note-body" spellcheck="true" aria-label="Notes for this PDF page"></div><div class="pdf-note-tools"><button id="pdfPageLinkButton" class="text-button">⌁ Link current page</button><button id="pdfImageButton" class="text-button">▧ Add image</button><input id="pdfImageInput" type="file" accept="image/*" hidden /></div></div><div class="pdf-tip"><span>✦</span><p>Notes stay linked to the page where you made them. Change pages to switch context.</p></div></aside>
           </div>
         </section>
       </main>
@@ -122,7 +123,8 @@
 
     <div id="studyModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="studyModalTitle"><div class="study-modal"><button class="modal-close" id="closeStudyButton" aria-label="Close">×</button><div class="eyebrow"><span class="eyebrow-dot violet"></span>QUICK STUDY <span id="cardPosition" class="card-position">1 OF 8</span></div><h2 id="studyModalTitle">What is the function of the cell membrane?</h2><button id="revealAnswerButton" class="flashcard-face">Tap to reveal answer <span>↻</span></button><div id="answerArea" class="answer-area hidden">It regulates what enters and leaves the cell, helping maintain a stable internal environment.</div><div class="study-actions hidden" id="studyActions"><button id="againButton" class="again-button">↻　Review again</button><button id="knowButton" class="know-button">✓　I knew it</button></div></div></div>
 
+    <div id="accountModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="accountTitle"><div class="account-modal"><button class="modal-close" id="closeAccountButton" aria-label="Close">×</button><div class="eyebrow"><span class="eyebrow-dot"></span>SYNC YOUR WORKSPACE</div><h2 id="accountTitle">Your notes, on every device</h2><p class="account-copy">Sign in to back up notes and sync edits between your devices.</p><label>Email<input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com" /></label><label>Password<input id="authPassword" type="password" autocomplete="current-password" placeholder="At least 8 characters" /></label><div class="account-actions"><button id="signInButton" class="study-button">Sign in</button><button id="signUpButton" class="text-button">Create account</button><button id="signOutButton" class="text-button hidden">Sign out</button></div><p id="accountStatus" class="account-status">Cloud sync requires Supabase settings in .env.</p></div></div>
     <div id="toast" class="toast hidden"></div>
-    <script src="app.js"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

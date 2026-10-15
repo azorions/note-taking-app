@@ -1,3 +1,10 @@
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { createNoteEditor, insertImageAtCursor } from './editor.js';
+import { cloudSyncConfigured, createNoteSyncSession, loadWorkspaceSnapshot, notifyWorkspaceChanged, saveWorkspaceSnapshot, subscribeWorkspace, supabase } from './sync.js';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
 const STORAGE_KEY = 'margin-scaffold-v1';
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel('margin-live-demo') : null;
 const initialState = {
@@ -48,13 +55,31 @@ function readSavedState() {
 }
 
 let state = readSavedState();
+let hasSavedLocalState = Boolean(localStorage.getItem(STORAGE_KEY));
 let currentInkColor = '#253e37';
 let isEraser = false;
 let inkPointer = null;
 let saveTimer = null;
-let pdfObjectUrl = null;
+let pdfDocument = null;
+let pdfRenderTask = null;
+let pdfRenderToken = 0;
+let pdfScale = 1;
+let pdfAnnotating = false;
+let pdfInkPointer = null;
 let activeCard = 0;
 let studyRevealed = false;
+let pdfActiveNoteId = null;
+let noteEditor = null;
+let noteEditorId = null;
+let pdfEditor = null;
+let pdfEditorId = null;
+let editorMountToken = 0;
+let pdfEditorMountToken = 0;
+let authUser = null;
+let workspaceChannel = null;
+let syncSessions = new Map();
+let cloudSaveTimer = null;
+let snapshotSaveQueue = Promise.resolve();
 const cards = [
   ['What is the function of the cell membrane?', 'It regulates what enters and leaves the cell, helping maintain a stable internal environment.'],
   ['What is the cell membrane mainly made of?', 'A phospholipid bilayer with proteins embedded throughout.'],
@@ -90,16 +115,47 @@ function persistState({ remote = false } = {}) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (error) { notify('This note is too large to save locally.'); }
+    hasSavedLocalState = true;
     if (channel && !remote) channel.postMessage({ type: 'workspace-update', state });
-    setStatus('All changes saved');
+    if (authUser && supabase && !remote) {
+      clearTimeout(cloudSaveTimer);
+      cloudSaveTimer = setTimeout(() => {
+        const user = authUser;
+        if (!user) return;
+        const payload = structuredClone(state);
+        delete payload.activeNotebook;
+        delete payload.activeTab;
+        delete payload.currentView;
+        snapshotSaveQueue = snapshotSaveQueue.then(async () => {
+          if (authUser?.id !== user.id) return;
+          try {
+            const { error } = await saveWorkspaceSnapshot(user.id, payload);
+            if (error) setStatus('Cloud save failed · saved on this device');
+            else {
+              notifyWorkspaceChanged(workspaceChannel);
+              setStatus('Saved and synced');
+            }
+          } catch (error) {
+            setStatus(`Cloud save failed · ${error.message || 'saved on this device'}`);
+          }
+        });
+      }, 550);
+    } else setStatus(authUser ? 'Saving locally · cloud offline' : 'Saved on this device');
     $('#noteUpdated').textContent = 'Edited just now';
   }, 180);
 }
-function updateNoteFromEditor() {
+function updateNoteFromEditor(noteId, editor) {
+  const note = state.notes[noteId];
+  if (!note) return;
+  note.body = editor.getHTML();
+  note.updatedAt = Date.now();
+  setStatus('Saving…');
+  persistState();
+}
+function updateNoteTitle() {
   const note = activeNote();
   if (!note) return;
   note.title = noteTitle.innerText.trim() || 'Untitled note';
-  note.body = noteBody.innerHTML;
   note.updatedAt = Date.now();
   const currentTab = activeNotebook().tabs.find((tab) => tab.id === note.id);
   if (currentTab) currentTab.label = note.title;
@@ -141,11 +197,228 @@ function updateBreadcrumbs() {
   $('#noteNotebookLabel').textContent = (activeNotebook()?.name || 'NOTEBOOK').toUpperCase();
 }
 
+function getSyncSession(noteId) {
+  if (!authUser || !supabase) return Promise.resolve(null);
+  if (!syncSessions.has(noteId)) {
+    const userId = authUser.id;
+    const sessionPromise = createNoteSyncSession(noteId, authUser, {
+      onStatus: (message) => { if (authUser?.id === userId && ((state.currentView === 'notes' && activeNote()?.id === noteId) || (state.currentView === 'pdf' && pdfActiveNoteId === noteId))) setStatus(message); },
+      onPresence: (presence) => { if (authUser?.id === userId && ((state.currentView === 'notes' && activeNote()?.id === noteId) || (state.currentView === 'pdf' && pdfActiveNoteId === noteId))) renderPresence(presence); }
+    }).catch((error) => {
+      if (syncSessions.get(noteId) === sessionPromise) syncSessions.delete(noteId);
+      if (authUser?.id === userId) setStatus(`Offline · ${error.message || 'saved on this device'}`);
+      return null;
+    });
+    syncSessions.set(noteId, sessionPromise);
+  }
+  return syncSessions.get(noteId);
+}
+
+function retireInactiveSyncSessions() {
+  const activeIds = new Set([noteEditorId, pdfEditorId].filter(Boolean));
+  for (const [noteId, sessionPromise] of syncSessions.entries()) {
+    if (activeIds.has(noteId)) continue;
+    void sessionPromise.then((session) => {
+      const stillActive = noteId === noteEditorId || noteId === pdfEditorId;
+      if (stillActive || syncSessions.get(noteId) !== sessionPromise) return;
+      syncSessions.delete(noteId);
+      session?.destroy();
+    });
+  }
+}
+
+async function mountNoteEditor(note) {
+  if (noteEditorId === note.id && noteEditor) return;
+  const token = ++editorMountToken;
+  noteEditor?.destroy();
+  noteEditor = null;
+  noteEditorId = note.id;
+  retireInactiveSyncSessions();
+  noteBody.replaceChildren();
+  const session = authUser ? await getSyncSession(note.id) : null;
+  if (token !== editorMountToken || activeNote()?.id !== note.id) return;
+  const editor = createNoteEditor({
+    element: noteBody,
+    content: note.body || '<p>Start writing here…</p>',
+    ydoc: session?.doc || null,
+    onUpdate: ({ editor: updatedEditor }) => updateNoteFromEditor(note.id, updatedEditor)
+  });
+  noteEditor = editor;
+  if (session?.doc && session.doc.getXmlFragment('default').length === 0) {
+    editor.commands.setContent(note.body || '<p>Start writing here…</p>');
+  }
+}
+
+function renderPresence(entries = []) {
+  const stack = $('#presenceStack');
+  const unique = [...new Map(entries.map((entry) => [entry.device_id || entry.user_id || entry.name, entry])).values()]
+    .filter((entry) => entry.device_id !== undefined)
+    .slice(0, 4);
+  stack.innerHTML = unique.map((person, index) => {
+    const initial = esc((person.name || 'You').trim().slice(0, 1).toUpperCase());
+    const color = person.color || ['#e8b1a0', '#a9bfd2', '#b8c7ad', '#d8c1a7'][index % 4];
+    return `<span class="collab-avatar" style="background:${esc(color)}" title="${esc(person.name || 'Connected device')}">${initial}</span>`;
+  }).join('');
+  stack.setAttribute('aria-label', unique.length ? `${unique.length} connected device${unique.length === 1 ? '' : 's'}` : 'No other devices connected');
+}
+
+function mergeWorkspaceSnapshot(remotePayload) {
+  if (!remotePayload || typeof remotePayload !== 'object' || !remotePayload.notes || !remotePayload.notebooks) return false;
+  const local = state;
+  const merged = structuredClone(remotePayload);
+  merged.notes ||= {};
+  merged.notebooks ||= [];
+  if (hasSavedLocalState) {
+    for (const [id, localNote] of Object.entries(local.notes || {})) {
+      const remoteNote = merged.notes[id];
+      if (!remoteNote || Number(localNote.updatedAt || 0) > Number(remoteNote.updatedAt || 0)) merged.notes[id] = structuredClone(localNote);
+    }
+    const books = new Map(merged.notebooks.map((book) => [book.id, book]));
+    for (const localBook of local.notebooks || []) {
+      if (!books.has(localBook.id)) {
+        merged.notebooks.push(structuredClone(localBook));
+        continue;
+      }
+      const remoteBook = books.get(localBook.id);
+      const tabs = new Map((remoteBook.tabs || []).map((tab) => [tab.id, tab]));
+      for (const localTab of localBook.tabs || []) if (!tabs.has(localTab.id)) tabs.set(localTab.id, structuredClone(localTab));
+      remoteBook.tabs = [...tabs.values()];
+    }
+    merged.customDecks = [...(merged.customDecks || [])];
+    for (const deck of local.customDecks || []) if (!merged.customDecks.some((item) => item.id === deck.id)) merged.customDecks.push(structuredClone(deck));
+    merged.study = local.study || merged.study;
+  }
+  for (const [id, localNote] of Object.entries(local.notes || {})) {
+    const target = merged.notes[id];
+    if (!target) continue;
+    const uniqueStrokes = (left = [], right = []) => {
+      const seen = new Set();
+      return [...left, ...right].filter((stroke) => {
+        const signature = JSON.stringify(stroke);
+        if (seen.has(signature)) return false;
+        seen.add(signature);
+        return true;
+      });
+    };
+    target.pdfPages = [...new Set([...(target.pdfPages || []), ...(localNote.pdfPages || [])])];
+    target.ink = uniqueStrokes(target.ink, localNote.ink);
+    target.pdfInk ||= {};
+    for (const [page, strokes] of Object.entries(localNote.pdfInk || {})) target.pdfInk[page] = uniqueStrokes(target.pdfInk[page], strokes);
+  }
+  if (merged.notebooks.some((book) => book.id === local.activeNotebook)) merged.activeNotebook = local.activeNotebook;
+  if (!merged.notebooks.some((book) => book.id === merged.activeNotebook)) merged.activeNotebook = merged.notebooks[0]?.id;
+  const book = merged.notebooks.find((item) => item.id === merged.activeNotebook);
+  if (book?.tabs?.some((tab) => tab.id === local.activeTab)) merged.activeTab = local.activeTab;
+  if (!book?.tabs?.some((tab) => tab.id === merged.activeTab)) merged.activeTab = book?.tabs?.[0]?.id;
+  merged.currentView = local.currentView || 'notes';
+  state = merged;
+  return true;
+}
+
+function updateAccountChrome() {
+  const loggedIn = Boolean(authUser);
+  $('#syncHeadline').textContent = loggedIn ? 'Syncing your workspace' : 'Saved on this device';
+  $('#syncDescription').textContent = loggedIn ? 'Edits sync across devices signed in to this account.' : (cloudSyncConfigured ? 'Sign in to sync notes across your devices.' : 'Add Supabase settings to enable cloud sync.');
+  $('#syncBadge').textContent = loggedIn ? 'CLOUD SYNC' : (cloudSyncConfigured ? 'SIGN IN' : 'LOCAL ONLY');
+  $('#accountStatus').textContent = loggedIn ? `Signed in as ${authUser.email || 'your account'}.` : (cloudSyncConfigured ? 'Sign in on each device to sync your workspace.' : 'Cloud sync requires Supabase settings in .env.');
+  $('#signInButton').classList.toggle('hidden', loggedIn);
+  $('#signUpButton').classList.toggle('hidden', loggedIn);
+  $('#signOutButton').classList.toggle('hidden', !loggedIn);
+  if (loggedIn) {
+    const display = authUser.user_metadata?.name || authUser.email?.split('@')[0] || 'Account';
+    $('.profile-row strong').textContent = display;
+    $('.profile-row small').textContent = authUser.email || 'Synced account';
+    $('.profile-avatar').textContent = display.slice(0, 1).toUpperCase();
+  } else {
+    $('.profile-row strong').textContent = 'Sam Rivera';
+    $('.profile-row small').textContent = 'Local workspace';
+    $('.profile-avatar').textContent = 'S';
+  }
+}
+
+function clearSyncSessions() {
+  for (const sessionPromise of syncSessions.values()) void sessionPromise.then((session) => session?.destroy());
+  syncSessions.clear();
+  renderPresence([]);
+}
+
+function resetEditorsForAccountChange() {
+  editorMountToken += 1;
+  pdfEditorMountToken += 1;
+  noteEditor?.destroy();
+  pdfEditor?.destroy();
+  noteEditor = null;
+  noteEditorId = null;
+  pdfEditor = null;
+  pdfEditorId = null;
+}
+
+async function refreshWorkspaceFromCloud(userId) {
+  try {
+    const snapshot = await loadWorkspaceSnapshot(userId);
+    if (authUser?.id !== userId) return;
+    if (!snapshot?.payload) {
+      persistState();
+      return;
+    }
+    if (mergeWorkspaceSnapshot(snapshot.payload)) {
+      renderNotebooks();
+      renderTabs();
+      renderStudyProgress();
+      renderCustomDecks();
+      updateBreadcrumbs();
+      if (!noteEditor?.isFocused && !pdfEditor?.isFocused && !noteTitle.matches(':focus') && !$('#pdfNoteTitle').matches(':focus')) renderNote();
+      drawSavedInk();
+      renderView();
+      persistState({ remote: true });
+      setStatus('Updated from another device');
+    }
+  } catch (error) {
+    if (authUser?.id === userId) setStatus(`Cloud unavailable · ${error.message || 'saved on this device'}`);
+  }
+}
+
+async function handleAuthSession(session) {
+  const nextUser = session?.user || null;
+  if (authUser?.id === nextUser?.id) return;
+  if (workspaceChannel && supabase) void supabase.removeChannel(workspaceChannel);
+  workspaceChannel = null;
+  clearSyncSessions();
+  resetEditorsForAccountChange();
+  authUser = nextUser;
+  updateAccountChrome();
+  if (!authUser) {
+    renderAll();
+    return;
+  }
+  const userId = authUser.id;
+  setStatus('Connecting to your workspace…');
+  await refreshWorkspaceFromCloud(userId);
+  if (authUser?.id !== userId) return;
+  workspaceChannel = subscribeWorkspace(userId, () => { void refreshWorkspaceFromCloud(userId); });
+  renderAll();
+  if (!hasSavedLocalState) persistState();
+}
+
+function initializeAuth() {
+  if (!supabase) {
+    updateAccountChrome();
+    $('#signInButton').disabled = true;
+    $('#signUpButton').disabled = true;
+    return;
+  }
+  supabase.auth.onAuthStateChange((_event, session) => { void handleAuthSession(session); });
+  void supabase.auth.getSession().then(({ data, error }) => {
+    if (error) $('#accountStatus').textContent = error.message;
+    else void handleAuthSession(data.session);
+  });
+}
+
 function renderNote() {
   const note = activeNote();
   if (!note) return;
   noteTitle.innerText = note.title;
-  noteBody.innerHTML = note.body || '<p>Start writing here…</p>';
+  if (state.currentView === 'notes') void mountNoteEditor(note);
   $('#handwritingIndex').value = note.handwritingIndex || '';
   $('#favoriteButton').classList.toggle('is-favorite', Boolean(note.favorite));
   $('#favoriteButton').textContent = note.favorite ? '★' : '☆';
@@ -161,7 +434,24 @@ function renderView() {
   $('#flashcardsView').classList.toggle('hidden', view !== 'flashcards');
   $('#pdfView').classList.toggle('hidden', view !== 'pdf');
   $$('.primary-nav [data-view]').forEach((item) => item.classList.toggle('active', item.dataset.view === view));
-  if (view === 'pdf') renderLinkedNotes();
+  if (view !== 'notes') {
+    editorMountToken += 1;
+    noteEditor?.destroy();
+    noteEditor = null;
+    noteEditorId = null;
+  }
+  if (view !== 'pdf') {
+    pdfEditorMountToken += 1;
+    pdfEditor?.destroy();
+    pdfEditor = null;
+    pdfEditorId = null;
+  }
+  if (view === 'notes') void mountNoteEditor(activeNote());
+  if (view === 'pdf') {
+    renderLinkedNotes();
+    void renderPdfPage();
+  }
+  retireInactiveSyncSessions();
 }
 
 function renderAll() {
@@ -198,6 +488,27 @@ function renderCustomDecks() {
     row.addEventListener('click', () => openStudy(deck));
     list.append(row);
   });
+}
+
+function makeFlashcardFromNote() {
+  const note = activeNote();
+  const selection = noteEditor?.state.selection;
+  const selectedText = selection && !selection.empty ? noteEditor.state.doc.textBetween(selection.from, selection.to, ' ').trim() : '';
+  const suggestedQuestion = selectedText ? `What should you remember about “${selectedText.slice(0, 55)}”?` : '';
+  const question = window.prompt('Flashcard question', suggestedQuestion);
+  if (!question?.trim()) return;
+  const answer = window.prompt('Flashcard answer', selectedText);
+  if (!answer?.trim()) return;
+  state.customDecks ||= [];
+  let deck = state.customDecks.find((item) => item.noteId === note.id);
+  if (!deck) {
+    deck = { id: `deck-${Date.now()}`, noteId: note.id, title: `${note.title} · cards`, source: activeNotebook().name, cards: [], progress: 0 };
+    state.customDecks.unshift(deck);
+  }
+  deck.cards.push([question.trim(), answer.trim()]);
+  renderCustomDecks();
+  persistState();
+  notify('Flashcard added to this note’s deck');
 }
 
 function cardsFromNote(note) {
@@ -283,53 +594,208 @@ function showSearchResults(query) {
   $$('[data-result]', results).forEach((button) => button.addEventListener('click', () => openNote(button.dataset.result)));
 }
 
-function insertHtmlAtCursor(html) {
-  noteBody.focus();
-  document.execCommand('insertHTML', false, html);
-  updateNoteFromEditor();
+function insertHtmlAtCursor(html, editor = noteEditor) {
+  if (!editor) return;
+  editor.chain().focus().insertContent(html).run();
 }
 
-function insertImage(dataUrl) {
-  insertHtmlAtCursor(`<img src="${dataUrl}" alt="Pasted image" />`);
+function insertImage(dataUrl, editor = noteEditor) {
+  insertImageAtCursor(editor, dataUrl);
 }
 
 function addPageReference(page) {
   const note = activeNote();
   const pageNumber = Math.max(1, Number(page) || 1);
+  note.pdfPages ||= [];
   if (!note.pdfPages.includes(pageNumber)) note.pdfPages.push(pageNumber);
+  note.updatedAt = Date.now();
   insertHtmlAtCursor(`<button class="page-ref" data-page="${pageNumber}">↗ Page ${pageNumber} in PDF</button>&nbsp;`);
   renderLinkedNotes();
+  persistState();
   notify(`Linked this note to page ${pageNumber}`);
 }
 
 function jumpToPdfPage(page) {
-  const number = Math.max(1, Number(page) || 1);
+  const requested = Math.max(1, Number(page) || 1);
+  const number = pdfDocument ? Math.min(pdfDocument.numPages, requested) : requested;
   $('#pageNumber').value = number;
-  if (pdfObjectUrl) $('#pdfFrame').src = `${pdfObjectUrl}#page=${number}`;
   state.currentView = 'pdf';
   renderView();
+  void renderPdfPage(number);
+}
+
+async function mountPdfEditor(note) {
+  if (pdfEditorId === note.id && pdfEditor) return;
+  const token = ++pdfEditorMountToken;
+  pdfEditor?.destroy();
+  pdfEditor = null;
+  pdfEditorId = note.id;
+  retireInactiveSyncSessions();
+  $('#pdfNoteBody').replaceChildren();
+  const session = authUser ? await getSyncSession(note.id) : null;
+  if (token !== pdfEditorMountToken || pdfActiveNoteId !== note.id) return;
+  pdfEditor = createNoteEditor({
+    element: $('#pdfNoteBody'),
+    content: note.body || '<p>Write notes for this page…</p>',
+    ydoc: session?.doc || null,
+    onUpdate: ({ editor }) => {
+      const current = state.notes[note.id];
+      if (!current) return;
+      current.body = editor.getHTML();
+      current.updatedAt = Date.now();
+      setStatus('Saving…');
+      persistState();
+    }
+  });
+  if (session?.doc && session.doc.getXmlFragment('default').length === 0) {
+    pdfEditor.commands.setContent(note.body || '<p>Write notes for this page…</p>');
+  }
 }
 
 function renderLinkedNotes() {
   const page = Number($('#pageNumber').value) || 1;
   const allNotes = Object.values(state.notes).filter((note) => note.pdfPages?.length);
   const visible = allNotes.filter((note) => note.pdfPages.includes(page));
-  $('#linkedNotesCount').textContent = `${allNotes.length} ${allNotes.length === 1 ? 'note' : 'notes'} connected`;
-  $('#linkedNoteList').innerHTML = visible.length ? visible.map((note) => `<button class="linked-note-card" data-linked-note="${esc(note.id)}"><strong>${esc(note.title)}</strong><span>Biology 101 <em>· Page ${page}</em></span></button>`).join('') : '<div class="empty-index">No notes linked to this page yet.</div>';
-  $$('[data-linked-note]').forEach((button) => button.addEventListener('click', () => openNote(button.dataset.linkedNote)));
+  $('#linkedNotesCount').textContent = `${visible.length} ${visible.length === 1 ? 'note' : 'notes'} · Page ${page}`;
+  $('#linkedNoteList').innerHTML = visible.map((note) => `<button class="linked-note-card ${note.id === pdfActiveNoteId ? 'selected' : ''}" data-linked-note="${esc(note.id)}"><strong>${esc(note.title)}</strong><span>${esc(findTabForNote(note.id)?.book?.name || 'Notebook')} <em>· Page ${page}</em></span></button>`).join('');
+  if (!visible.some((note) => note.id === pdfActiveNoteId)) pdfActiveNoteId = visible[0]?.id || null;
+  $('#pdfNoLinkedNotes').classList.toggle('hidden', Boolean(pdfActiveNoteId));
+  $('#pdfInlineEditor').classList.toggle('hidden', !pdfActiveNoteId);
+  if (pdfActiveNoteId) {
+    const note = state.notes[pdfActiveNoteId];
+    $('#pdfNoteTitle').value = note.title;
+    void mountPdfEditor(note);
+  } else {
+    pdfEditor?.destroy();
+    pdfEditor = null;
+    pdfEditorId = null;
+    pdfEditorMountToken += 1;
+  }
+  $$('[data-linked-note]').forEach((button) => button.addEventListener('click', () => { pdfActiveNoteId = button.dataset.linkedNote; renderLinkedNotes(); }));
+  drawPdfInk();
+  retireInactiveSyncSessions();
 }
 
-function loadPdf(file) {
+function savePdfActiveNote() {
+  const note = state.notes[pdfActiveNoteId];
+  if (!note) return;
+  note.title = $('#pdfNoteTitle').value.trim() || 'Untitled PDF note';
+  note.updatedAt = Date.now();
+  const tab = findTabForNote(note.id)?.tab;
+  if (tab) tab.label = note.title;
+  const tabButton = $$('#tabs [data-tab]').find((button) => button.dataset.tab === note.id);
+  if (tabButton) tabButton.textContent = note.title;
+  const linkedCard = $$('[data-linked-note]').find((button) => button.dataset.linkedNote === note.id);
+  if (linkedCard) linkedCard.querySelector('strong').textContent = note.title;
+  setStatus('Saving…');
+  persistState();
+}
+
+function createPdfNote() {
+  const page = Math.max(1, Number($('#pageNumber').value) || 1);
+  const id = `note-${Date.now()}`;
+  const title = `PDF note · page ${page}`;
+  state.notes[id] = { id, title, body: `<p>Notes from page ${page}…</p>`, handwritingIndex: '', pdfPages: [page], ink: [], pdfInk: {}, updatedAt: Date.now(), favorite: false };
+  activeNotebook().tabs.push({ id, label: title });
+  pdfActiveNoteId = id;
+  renderNotebooks();
+  renderTabs();
+  renderLinkedNotes();
+  persistState();
+}
+
+async function loadPdf(file) {
   if (!file) return;
-  if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl);
-  pdfObjectUrl = URL.createObjectURL(file);
-  $('#pdfFileName').textContent = file.name;
-  $('#pdfTitle').textContent = file.name;
-  $('#pdfEmpty').classList.add('hidden');
-  $('#pdfFrame').classList.remove('hidden');
-  $('#pdfFrame').src = `${pdfObjectUrl}#page=${$('#pageNumber').value || 1}`;
-  $('#pageTotal').textContent = '—';
-  notify('PDF opened in this browser session');
+  try {
+    pdfRenderToken += 1;
+    if (pdfRenderTask) { try { pdfRenderTask.cancel(); await pdfRenderTask.promise; } catch { /* Previous render ended. */ } }
+    if (pdfDocument) await pdfDocument.destroy();
+    pdfDocument = null;
+    pdfRenderTask = null;
+    const loadingTask = pdfjsLib.getDocument({ data: await file.arrayBuffer() });
+    pdfDocument = await loadingTask.promise;
+    $('#pdfFileName').textContent = file.name;
+    $('#pdfTitle').textContent = file.name;
+    $('#pdfEmpty').classList.add('hidden');
+    $('#pdfCanvasHost').classList.remove('hidden');
+    $('#pageTotal').textContent = String(pdfDocument.numPages);
+    const requestedPage = Math.max(1, Math.min(pdfDocument.numPages, Number($('#pageNumber').value) || 1));
+    $('#pageNumber').value = requestedPage;
+    state.pdfName = file.name;
+    await renderPdfPage(requestedPage);
+    renderLinkedNotes();
+    persistState();
+    notify('PDF opened in this browser session');
+  } catch (error) {
+    notify(`Could not open PDF: ${error.message || 'unsupported file'}`);
+  }
+}
+
+async function renderPdfPage(pageNumber = Number($('#pageNumber').value) || 1) {
+  if (!pdfDocument) return;
+  const token = ++pdfRenderToken;
+  if (pdfRenderTask) {
+    try { pdfRenderTask.cancel(); await pdfRenderTask.promise; }
+    catch { /* A previous page was cancelled or already complete. */ }
+  }
+  if (token !== pdfRenderToken || !pdfDocument) return;
+  let page;
+  try { page = await pdfDocument.getPage(Math.min(pdfDocument.numPages, Math.max(1, pageNumber))); }
+  catch (error) { if (token === pdfRenderToken) notify(`Could not render PDF page: ${error.message || 'render error'}`); return; }
+  if (token !== pdfRenderToken) return;
+  const host = $('#pdfCanvasHost');
+  const baseViewport = page.getViewport({ scale: 1 });
+  const availableWidth = Math.max(240, host.clientWidth - 34);
+  const availableHeight = Math.max(300, host.clientHeight - 34);
+  const fitScale = Math.min(availableWidth / baseViewport.width, availableHeight / baseViewport.height);
+  const viewport = page.getViewport({ scale: fitScale * pdfScale });
+  const outputScale = window.devicePixelRatio || 1;
+  const canvas = $('#pdfCanvas');
+  const annotationCanvas = $('#pdfAnnotationCanvas');
+  const stage = $('#pdfPageStage');
+  stage.style.width = `${viewport.width}px`;
+  stage.style.height = `${viewport.height}px`;
+  for (const target of [canvas, annotationCanvas]) {
+    target.width = Math.round(viewport.width * outputScale);
+    target.height = Math.round(viewport.height * outputScale);
+    target.style.width = `${viewport.width}px`;
+    target.style.height = `${viewport.height}px`;
+  }
+  const canvasContext = canvas.getContext('2d');
+  const renderTask = page.render({ canvasContext, viewport, transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0] });
+  pdfRenderTask = renderTask;
+  try { await renderTask.promise; }
+  catch (error) {
+    if (error?.name !== 'RenderingCancelledException' && token === pdfRenderToken) notify(`Could not render PDF page: ${error.message || 'render error'}`);
+  }
+  if (token === pdfRenderToken) drawPdfInk();
+}
+
+function drawPdfInk() {
+  const canvas = $('#pdfAnnotationCanvas');
+  if (!canvas.width || !canvas.height) return;
+  const ctx = canvas.getContext('2d');
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  const scale = window.devicePixelRatio || 1;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const note = state.notes[pdfActiveNoteId];
+  const strokes = note?.pdfInk?.[Number($('#pageNumber').value)] || [];
+  strokes.forEach((stroke) => {
+    if (!stroke.points?.length) return;
+    ctx.beginPath();
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.size || 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    stroke.points.forEach((point, index) => {
+      const x = point.x * width;
+      const y = point.y * height;
+      if (!index) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  });
 }
 
 function resizeInkCanvas() {
@@ -391,6 +857,8 @@ function moveInk(event) {
 function endInk() {
   if (!inkPointer) return;
   inkPointer = null;
+  const note = activeNote();
+  if (note) note.updatedAt = Date.now();
   persistState();
 }
 
@@ -424,33 +892,34 @@ function recordStudy(known) {
   studyRevealed = false;
   renderCard();
   renderStudyProgress();
+  renderCustomDecks();
   persistState();
 }
 
 // Editor content and formatting.
-noteBody.addEventListener('input', updateNoteFromEditor);
-noteTitle.addEventListener('input', updateNoteFromEditor);
+noteTitle.addEventListener('input', updateNoteTitle);
 $('#handwritingIndex').addEventListener('input', (event) => {
   activeNote().handwritingIndex = event.target.value;
+  activeNote().updatedAt = Date.now();
   setStatus('Saving…');
   persistState();
 });
 $$('.tool-button[data-command]').forEach((button) => {
   button.addEventListener('mousedown', (event) => event.preventDefault());
   button.addEventListener('click', () => {
-    noteBody.focus();
     const command = button.dataset.command;
-    if (command === 'formatBlock') document.execCommand(command, false, button.dataset.value);
-    else document.execCommand(command, false, null);
-    updateNoteFromEditor();
+    if (!noteEditor) return;
+    if (command === 'formatBlock') noteEditor.chain().focus().toggleHeading({ level: 2 }).run();
+    else if (command === 'underline') noteEditor.chain().focus().toggleMark('underline').run();
+    else noteEditor.chain().focus().toggleMark(command).run();
   });
 });
 $('#bulletButton').addEventListener('mousedown', (event) => event.preventDefault());
-$('#bulletButton').addEventListener('click', () => { noteBody.focus(); document.execCommand('insertUnorderedList'); updateNoteFromEditor(); });
+$('#bulletButton').addEventListener('click', () => noteEditor?.chain().focus().toggleBulletList().run());
 $('#checklistButton').addEventListener('mousedown', (event) => event.preventDefault());
-$('#checklistButton').addEventListener('click', () => insertHtmlAtCursor('<p class="check-row"><input type="checkbox" /> <span>New checklist item</span></p>'));
+$('#checklistButton').addEventListener('click', () => noteEditor?.chain().focus().toggleTaskList().run());
 $('#toggleButton').addEventListener('mousedown', (event) => event.preventDefault());
-$('#toggleButton').addEventListener('click', () => insertHtmlAtCursor('<details open><summary>Toggle heading</summary><p>Click here to add the hidden details.</p></details><p><br></p>'));
+$('#toggleButton').addEventListener('click', () => insertHtmlAtCursor('<details><summary>Toggle heading</summary><div><p>Click here to add the hidden details.</p></div></details><p></p>'));
 $('#insertImageButton').addEventListener('mousedown', (event) => event.preventDefault());
 $('#insertImageButton').addEventListener('click', () => $('#imageInput').click());
 $('#imageInput').addEventListener('change', (event) => {
@@ -474,7 +943,9 @@ noteBody.addEventListener('click', (event) => {
 });
 $('#pageLinkButton').addEventListener('mousedown', (event) => event.preventDefault());
 $('#pageLinkButton').addEventListener('click', () => addPageReference($('#pageNumber').value || 1));
-$('#favoriteButton').addEventListener('click', () => { const note = activeNote(); note.favorite = !note.favorite; renderNote(); persistState(); });
+$('#makeFlashcardButton').addEventListener('mousedown', (event) => event.preventDefault());
+$('#makeFlashcardButton').addEventListener('click', makeFlashcardFromNote);
+$('#favoriteButton').addEventListener('click', () => { const note = activeNote(); note.favorite = !note.favorite; note.updatedAt = Date.now(); renderNote(); persistState(); });
 
 // Annotation layer uses pointer events so Apple Pencil, touch, and mouse all work.
 $('#annotateButton').addEventListener('click', () => {
@@ -488,7 +959,7 @@ $$('.pen-color').forEach((button) => button.addEventListener('click', () => {
   $('#eraserButton').classList.remove('active');
 }));
 $('#eraserButton').addEventListener('click', () => { isEraser = !isEraser; $('#eraserButton').classList.toggle('active', isEraser); });
-$('#clearInkButton').addEventListener('click', () => { activeNote().ink = []; drawSavedInk(); persistState(); });
+$('#clearInkButton').addEventListener('click', () => { activeNote().ink = []; activeNote().updatedAt = Date.now(); drawSavedInk(); persistState(); });
 inkCanvas.addEventListener('pointerdown', startInk);
 inkCanvas.addEventListener('pointermove', moveInk);
 inkCanvas.addEventListener('pointerup', endInk);
@@ -508,7 +979,32 @@ document.addEventListener('keydown', (event) => {
 $$('.primary-nav [data-view]').forEach((button) => button.addEventListener('click', () => { state.currentView = button.dataset.view; renderView(); persistState(); }));
 $('#addTab').addEventListener('click', addTab);
 $('#addNotebook').addEventListener('click', addNotebook);
-$('#shareButton').addEventListener('click', () => notify('Invite and cloud sharing will connect when a sync service is added.'));
+$('#shareButton').addEventListener('click', () => {
+  $('#accountModal').classList.remove('hidden');
+  updateAccountChrome();
+  if (!cloudSyncConfigured) $('#accountStatus').textContent = 'Create a Supabase project and add its URL and publishable key to .env first.';
+  if (authUser) $('#authEmail').value = authUser.email || '';
+});
+$('#closeAccountButton').addEventListener('click', () => $('#accountModal').classList.add('hidden'));
+$('#accountModal').addEventListener('click', (event) => { if (event.target === $('#accountModal')) $('#accountModal').classList.add('hidden'); });
+$('#signInButton').addEventListener('click', async () => {
+  if (!supabase) { $('#accountStatus').textContent = 'Cloud sync requires Supabase settings in .env.'; return; }
+  $('#accountStatus').textContent = 'Signing in…';
+  const { error } = await supabase.auth.signInWithPassword({ email: $('#authEmail').value.trim(), password: $('#authPassword').value });
+  $('#accountStatus').textContent = error ? error.message : 'Signed in. Connecting your workspace…';
+});
+$('#signUpButton').addEventListener('click', async () => {
+  if (!supabase) { $('#accountStatus').textContent = 'Cloud sync requires Supabase settings in .env.'; return; }
+  $('#accountStatus').textContent = 'Creating your account…';
+  const { data, error } = await supabase.auth.signUp({ email: $('#authEmail').value.trim(), password: $('#authPassword').value });
+  $('#accountStatus').textContent = error ? error.message : (data.session ? 'Account created. Connecting your workspace…' : 'Check your email to confirm the account, then sign in here.');
+});
+$('#signOutButton').addEventListener('click', async () => {
+  if (!supabase) return;
+  $('#accountStatus').textContent = 'Signing out…';
+  const { error } = await supabase.auth.signOut();
+  $('#accountStatus').textContent = error ? error.message : 'Signed out. Your local copy remains on this device.';
+});
 $('#createDeckButton').addEventListener('click', () => {
   const note = activeNote();
   const title = window.prompt('Name your flashcard deck', `${note?.title || 'New'} · review`);
@@ -528,36 +1024,113 @@ $('#revealAnswerButton').addEventListener('click', () => { studyRevealed = true;
 $('#againButton').addEventListener('click', () => recordStudy(false));
 $('#knowButton').addEventListener('click', () => recordStudy(true));
 
-// PDF reader and note-to-page links.
-$('#pdfInput').addEventListener('change', (event) => loadPdf(event.target.files[0]));
-$('#pdfInputEmpty').addEventListener('change', (event) => loadPdf(event.target.files[0]));
-$('#pageNumber').addEventListener('change', () => { const page = Number($('#pageNumber').value) || 1; $('#pageNumber').value = Math.max(1, page); if (pdfObjectUrl) $('#pdfFrame').src = `${pdfObjectUrl}#page=${Math.max(1, page)}`; renderLinkedNotes(); });
-$('#previousPage').addEventListener('click', () => { $('#pageNumber').value = Math.max(1, Number($('#pageNumber').value || 1) - 1); $('#pageNumber').dispatchEvent(new Event('change')); });
-$('#nextPage').addEventListener('click', () => { $('#pageNumber').value = Number($('#pageNumber').value || 1) + 1; $('#pageNumber').dispatchEvent(new Event('change')); });
-$('#newPdfNote').addEventListener('click', () => {
-  const id = `note-${Date.now()}`;
-  const page = Number($('#pageNumber').value) || 1;
-  const title = `PDF note · page ${page}`;
-  state.notes[id] = { id, title, body: `<p>Notes from page ${page}…</p><p><button class="page-ref" data-page="${page}">↗ Page ${page} in PDF</button></p>`, handwritingIndex: '', pdfPages: [page], ink: [], updatedAt: Date.now(), favorite: false };
-  const book = activeNotebook();
-  book.tabs.push({ id, label: title });
-  state.activeTab = id;
-  state.currentView = 'notes';
-  renderAll(); persistState();
+// PDF reader, handwriting layer, and note-to-page links.
+$('#pdfInput').addEventListener('change', (event) => { void loadPdf(event.target.files[0]); event.target.value = ''; });
+$('#pdfInputEmpty').addEventListener('change', (event) => { void loadPdf(event.target.files[0]); event.target.value = ''; });
+$('#pageNumber').addEventListener('change', () => {
+  let page = Math.max(1, Number($('#pageNumber').value) || 1);
+  if (pdfDocument) page = Math.min(pdfDocument.numPages, page);
+  $('#pageNumber').value = page;
+  renderLinkedNotes();
+  void renderPdfPage(page);
 });
-$('#zoomButton').addEventListener('click', () => notify('Use your browser’s PDF controls to adjust zoom.'));
+$('#previousPage').addEventListener('click', () => { $('#pageNumber').value = Math.max(1, Number($('#pageNumber').value || 1) - 1); $('#pageNumber').dispatchEvent(new Event('change')); });
+$('#nextPage').addEventListener('click', () => { $('#pageNumber').value = Math.min(pdfDocument?.numPages || Number.MAX_SAFE_INTEGER, Number($('#pageNumber').value || 1) + 1); $('#pageNumber').dispatchEvent(new Event('change')); });
+$('#newPdfNote').addEventListener('click', createPdfNote);
+$('#createPdfNoteInline').addEventListener('click', createPdfNote);
+$('#pdfNoteTitle').addEventListener('input', savePdfActiveNote);
+$('#pdfNoteBody').addEventListener('click', (event) => {
+  const pageRef = event.target.closest('[data-page]');
+  if (pageRef) { event.preventDefault(); jumpToPdfPage(pageRef.dataset.page); }
+});
+$('#pdfPageLinkButton').addEventListener('mousedown', (event) => event.preventDefault());
+$('#pdfPageLinkButton').addEventListener('click', () => {
+  const note = state.notes[pdfActiveNoteId];
+  if (!note || !pdfEditor) return;
+  const page = Math.max(1, Number($('#pageNumber').value) || 1);
+  note.pdfPages ||= [];
+  if (!note.pdfPages.includes(page)) note.pdfPages.push(page);
+  insertHtmlAtCursor(`<p><button class="page-ref" data-page="${page}">↗ Page ${page} in PDF</button></p>`, pdfEditor);
+  persistState();
+  renderLinkedNotes();
+});
+$('#pdfImageButton').addEventListener('mousedown', (event) => event.preventDefault());
+$('#pdfImageButton').addEventListener('click', () => $('#pdfImageInput').click());
+$('#pdfImageInput').addEventListener('change', (event) => {
+  const file = event.target.files[0];
+  if (file) { const reader = new FileReader(); reader.onload = () => insertImage(reader.result, pdfEditor); reader.readAsDataURL(file); }
+  event.target.value = '';
+});
+$('#pdfNoteBody').addEventListener('paste', (event) => {
+  const item = [...(event.clipboardData?.items || [])].find((clip) => clip.type.startsWith('image/'));
+  if (!item) return;
+  event.preventDefault();
+  const file = item.getAsFile();
+  if (file) { const reader = new FileReader(); reader.onload = () => insertImage(reader.result, pdfEditor); reader.readAsDataURL(file); }
+});
+$('#pdfAnnotateButton').addEventListener('click', () => {
+  pdfAnnotating = !pdfAnnotating;
+  $('#pdfAnnotateButton').classList.toggle('active', pdfAnnotating);
+  $('#pdfAnnotationCanvas').classList.toggle('is-annotating', pdfAnnotating);
+  $('#pdfAnnotationCanvas').setAttribute('aria-label', pdfAnnotating ? 'Draw on this PDF page' : 'PDF annotations');
+});
+$('#zoomButton').addEventListener('click', () => {
+  pdfScale = pdfScale >= 1.5 ? 1 : +(pdfScale + 0.25).toFixed(2);
+  $('#zoomButton').textContent = `${Math.round(pdfScale * 100)}%　⌄`;
+  void renderPdfPage();
+});
+$('#pdfAnnotationCanvas').addEventListener('pointerdown', (event) => {
+  if (!pdfAnnotating || (event.button !== undefined && event.button !== 0)) return;
+  event.preventDefault();
+  if (!pdfActiveNoteId) createPdfNote();
+  const canvas = $('#pdfAnnotationCanvas');
+  canvas.setPointerCapture(event.pointerId);
+  const rect = canvas.getBoundingClientRect();
+  const note = state.notes[pdfActiveNoteId];
+  const page = Number($('#pageNumber').value) || 1;
+  note.pdfInk ||= {};
+  note.pdfInk[page] ||= [];
+  const stroke = { color: currentInkColor, size: event.pointerType === 'pen' ? 2 : 2.6, points: [{ x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height }] };
+  note.pdfInk[page].push(stroke);
+  pdfInkPointer = stroke;
+  drawPdfInk();
+});
+$('#pdfAnnotationCanvas').addEventListener('pointermove', (event) => {
+  if (!pdfInkPointer || !pdfAnnotating) return;
+  event.preventDefault();
+  const rect = $('#pdfAnnotationCanvas').getBoundingClientRect();
+  pdfInkPointer.points.push({ x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) });
+  drawPdfInk();
+});
+const finishPdfInk = () => { if (!pdfInkPointer) return; pdfInkPointer = null; const note = state.notes[pdfActiveNoteId]; if (note) note.updatedAt = Date.now(); persistState(); };
+$('#pdfAnnotationCanvas').addEventListener('pointerup', finishPdfInk);
+$('#pdfAnnotationCanvas').addEventListener('pointercancel', finishPdfInk);
+const pdfResizeObserver = new ResizeObserver(() => { if (pdfDocument) void renderPdfPage(); });
+pdfResizeObserver.observe($('#pdfCanvasHost'));
 
-// Same-browser tabs share edits immediately. Cross-device sync needs a server-backed service.
+// Keep the offline local copy current and relay changes to other tabs in this browser.
 if (channel) channel.addEventListener('message', (event) => {
   if (event.data?.type !== 'workspace-update' || !event.data.state) return;
   state = event.data.state;
   setStatus('Updated from another tab');
   renderNotebooks(); renderTabs(); renderStudyProgress(); updateBreadcrumbs();
-  if (!noteBody.matches(':focus') && !noteTitle.matches(':focus')) renderNote();
+  if (!authUser && !noteEditor?.isFocused && !noteTitle.matches(':focus')) {
+    noteEditor?.destroy(); noteEditor = null; noteEditorId = null;
+    renderNote();
+  }
+  if (state.currentView === 'pdf' && !pdfEditor?.isFocused && !$('#pdfNoteTitle').matches(':focus')) {
+    if (!authUser) { pdfEditor?.destroy(); pdfEditor = null; pdfEditorId = null; }
+    renderLinkedNotes();
+  }
 });
 window.addEventListener('storage', (event) => {
-  if (event.key !== STORAGE_KEY || !event.newValue || noteBody.matches(':focus') || noteTitle.matches(':focus')) return;
-  try { state = JSON.parse(event.newValue); renderAll(); setStatus('Updated from another tab'); } catch { /* Ignore a partial write. */ }
+  if (event.key !== STORAGE_KEY || !event.newValue || noteEditor?.isFocused || noteTitle.matches(':focus') || pdfEditor?.isFocused || $('#pdfNoteTitle').matches(':focus')) return;
+  try {
+    state = JSON.parse(event.newValue);
+    if (!authUser) { noteEditor?.destroy(); noteEditor = null; noteEditorId = null; pdfEditor?.destroy(); pdfEditor = null; pdfEditorId = null; }
+    renderAll(); setStatus('Updated from another tab');
+  } catch { /* Ignore a partial write. */ }
 });
 
 renderAll();
+initializeAuth();
