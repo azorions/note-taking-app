@@ -1,31 +1,40 @@
-# Margin notes app scaffold
+# Margin
 
-A responsive, dependency-free prototype for a notebook app that combines typed notes, stylus annotations, flashcards, search, and PDF study notes.
+Margin is a browser based study notebook for rich text notes, stylus annotations, PDF study, and flashcards. It keeps a local copy on each device and can sync a private workspace through Supabase.
 
-## Run it
+## Run locally
 
-Open `index.html` in a modern browser, or serve this directory locally:
+Requires Node.js 20.19 or newer.
 
 ```powershell
-python -m http.server 4173
+npm install
+npm run dev
 ```
 
-Then open <http://localhost:4173>.
+Open the local URL printed by Vite. Notes work locally without an account or Supabase project.
 
-## Scaffolded interactions
+## Enable same-account sync
 
-- **Notebooks and sections:** switch between notebooks, add notebooks, and add section tabs. Notes and titles save in browser storage.
-- **Notes:** edit text, format it, add lists and collapsible toggles, paste images into the editor, or use the image picker.
-- **Handwriting:** draw with Apple Pencil, touch, or a mouse. Add a searchable handwriting index alongside the ink. The search field matches note text and that index.
-- **Search:** search titles, typed note content, and handwriting index terms, then jump to a matching note.
-- **Flashcards:** study the included deck, mark cards for review or as known, and create a deck from the active note's headings and paragraphs. Progress is shown on the study screen.
-- **PDF study:** open a PDF in the browser, set a page number, link notes to a page, and jump from a note back to its page. The PDF itself stays in the current browser session.
-- **Live editing demo:** edits are saved locally and broadcast to other open tabs of the app in the same browser.
+1. Create a Supabase project.
+2. Run `supabase/migrations/20261015000100_workspace_sync.sql` in the project's SQL editor.
+3. Copy `.env.example` to `.env` and set the project URL and publishable key.
+4. Restart `npm run dev`, then use **Sync** to create an account or sign in on each device.
 
-## Services to connect for a multi-device product
+The migration stores workspace snapshots and Yjs document updates with row-level security. Each device must sign in to the same account. This is private workspace sync; inviting other accounts and granular sharing are not implemented yet.
 
-This repository has no server or account system yet. Cross-device sync and Google Docs-style collaboration need an authenticated backend that stores notebook content and broadcasts edits, plus conflict handling for simultaneous edits. The share button and collaborator avatars are UI scaffolds; they do not invite other users. Replace the local storage/BroadcastChannel adapter in `app.js` with the chosen sync service when one is selected.
+## Current features
 
-Handwriting search currently uses a user-editable index; it does not recognize ink automatically. Connect handwriting OCR and indexing to search to enable automatic search of handwritten pages. PDF page count and annotations are also basic scaffolds: this version opens the browser's built-in PDF viewer and stores page links in the note.
+- Notebooks with section tabs, favorites, rich text, toggles, task lists, and pasted or uploaded images.
+- Apple Pencil, touch, or mouse ink on notes and PDF pages. Add searchable terms to the handwriting index next to note ink.
+- Search across note titles, rich text, and handwriting index terms.
+- Flashcard decks from selected note text or note headings, with study progress.
+- PDF.js page rendering with page navigation, zoom, a separate linked notes editor, page references, and an ink layer.
+- Local browser storage, same-browser cross-tab updates, Supabase account sync, Yjs text collaboration, and active device presence.
 
-All sample content and edits are stored in the browser's local storage. Use **Clear site data** in your browser to reset this demo.
+## Current limits
+
+- Handwriting search uses the words entered in the handwriting index; automatic handwriting OCR is not connected.
+- A PDF is opened from the current device and remains in that browser session. The PDF file itself is not uploaded or synced, so reopen the same file on each device.
+- Rich text edits merge through Yjs. Other workspace data, such as notebook metadata, flashcards, and ink strokes, sync through snapshots; simultaneous changes to the same metadata are resolved by latest edit time.
+- Sync currently covers one account's devices. Sharing with collaborators, invitations, and permissions are future work.
+- Images are embedded in note content, so very large pasted images can exceed local browser storage limits.
